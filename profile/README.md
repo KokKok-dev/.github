@@ -84,88 +84,6 @@
 
 <br>
 
-## ✨ 주요 기능 (Key Features)
-
-### 1️⃣ 인증 및 회원 관리 (Auth Service)
-* **통합 회원가입:** 사업자 번호 유무에 따른 Role 자동 부여 (CUSTOMER / OWNER)
-* **보안:** JWT Access/Refresh Token 기반 인증 및 Redis Blacklist를 통한 로그아웃 처리
-* **Gateway:** `GlobalFilter`를 통한 JWT 파싱 및 `X-User-Id` 헤더 주입
-
-### 2️⃣ 음식점 관리 및 검색 (Store & Search Service)
-* **CQRS 패턴 적용:** Command(PostgreSQL)와 Query(Elasticsearch) 책임 분리
-* **데이터 동기화:** Kafka를 통해 Store 변경 사항을 Search 서비스로 실시간 전파 (Eventual Consistency)
-* **고성능 검색:** Elasticsearch Nori 분석기 활용 및 `search_after` 기반 Cursor 페이징 구현
-
-### 3️⃣ 예약 및 웨이팅 시스템 (Reservation & Waiting Service)
-* **일반 예약:** 트랜잭션 보장을 통한 중복 예약 방지 및 정책 검증
-* **인기 맛집 예약 (대기열):** Redis `ZSet`을 활용한 대기열 시스템 (순번 보장, 진입 제어)
-* **현장 웨이팅:** 실시간 줄서기 및 예상 대기시간 계산, SSE를 통한 입장 알림
-
-### 4️⃣ 리뷰 및 커뮤니티 (Review Service)
-* **신뢰성 확보:** 방문 완료(DONE) 된 예약에 한해서만 리뷰 작성 가능
-* **통계 최적화:** Kafka를 활용해 리뷰 작성 시 평균 평점/리뷰 수를 비동기로 집계하여 Store 서비스에 반영
-
-<br>
-
-## 🗣️ 기술적 의사결정 (Technical Decisions)
-
-<details>
-<summary><strong>1. Monorepo vs Polyrepo: 모노레포 선택</strong></summary>
-
-* **배경:** 4인의 소규모 팀으로 빠른 개발과 협업 효율성이 필요함.
-* **선택:** **Monorepo**
-* **이유:** 공통 설정(Git Convention, Build Logic) 유지 비용 감소 및 팀원 간 전체 아키텍처 이해도 증진을 위함.
-</details>
-
-<details>
-<summary><strong>2. CQRS 패턴과 Kafka 도입</strong></summary>
-
-* **문제:** 음식점 도메인의 복잡한 조인 연산과 조회 트래픽(Read)이 쓰기(Write) 트래픽보다 압도적으로 높음(8:2 비율).
-* **해결:**
-    * **CQRS:** Store Service(Write/RDBMS)와 Search Service(Read/Elasticsearch) 분리.
-    * **Kafka:** 서비스 간 느슨한 결합을 유지하며 데이터 최종 일관성 보장. 장애 발생 시 메시지 유실 방지.
-</details>
-
-<details>
-<summary><strong>3. Redis ZSet을 활용한 대기열 관리</strong></summary>
-
-* **문제:** RDBMS `COUNT(*)`로 대기 순번을 계산할 경우 대량 트래픽 시 DB 부하 심각.
-* **해결:** **Redis Sorted Set (ZSet)** 도입.
-* **성과:** 대기 순번 확인 시간 복잡도를 $O(\log N)$으로 단축하여 실시간 응답 속도 개선.
-</details>
-
-<br>
-
-## 🏀 트러블슈팅 (Troubleshooting) & 성능 개선
-<details>
-<summary><strong>1. 인기 맛집 예약 트래픽 제어 (Distributed Queue)</strong></summary>
-  
-* **상황:** 인기 매장 예약 오픈 시 트래픽 폭주로 인한 Connection Refused 및 응답 지연 발생 (평균 446ms, 오류율 0.91%).
-* **해결:** Redis `ZSet` 기반의 대기열 시스템 도입.
-* **진입 제어:** 스케줄러가 'Score=예약제한시간'을 기준으로 N명씩만 예약 가능 상태로 전환.
-* **최적화:** 대기열 진입 시에만 순위를 계산하고, 이후 알림은 '입장 인원 수'만 전달하여 클라이언트가 순위를 계산하도록 하여 서버 연산 최소화.
-* **결과:** 안정적인 트래픽 처리 및 서버 리소스 효율화 달성.
-</details>
-
-<details>
-<summary><strong>2. 웨이팅 번호 발급 동시성 이슈 해결</strong></summary>
-* **문제:** JMeter 테스트 시 동시 요청에 대해 중복된 웨이팅 번호가 발급되는 현상 발생.
-* **시도 1 (DB Lock):** `PESSIMISTIC_WRITE` 락 적용 → 정합성은 해결되었으나 대기 시간 누적으로 성능 저하 (72ms).
-* **시도 2 (Redis Atomic):** **Redis `INCR` 명령어 사용**.
-* **결과:** 락 없이 원자성(Atomicity)을 보장하며 처리 속도 **72ms → 0.002ms**로 획기적 개선.
-</details>
-
-<details>
-<summary><strong>3. 리뷰 조회 성능 최적화 (Index & Cursor Paging)</strong></summary>
-* **문제:** 100만 건 데이터 조회 시 Full Table Scan 발생 (61.96ms), Deep Pagination 시 성능 저하.
-* **해결:**
-    1.  복합 인덱스 적용 (`idx_store_created_at`).
-    2.  `Offset` 방식 대신 `Cursor` 기반 페이징(No-Offset) 도입.
-* **결과:** 쿼리 실행 시간 **32.45ms → 0.025ms (약 1,298배 개선)** 및 일정한 조회 속도 $O(1)$ 보장.
-</details>
-
-<br>
-
 ## 서비스별 포트번호
 | 서비스명 | 포트번호 |
 |:---:|:---:|
@@ -179,8 +97,4 @@
 | **Waiting-service** | 8086 |
 | **Review-service** | 8087 |
 
-## 💾 설치 및 실행 방법 (Getting Started)
-
-1. **Repository Clone**
-   ```bash
-   git clone [https://github.com/username/TableKok.git](https://github.com/username/TableKok.git)
+<br>
